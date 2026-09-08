@@ -3,7 +3,7 @@ name: Async Uptime & SSL Monitor
 on:
   schedule:
     - cron: '*/5 * * * *'  # Runs automatically every 5 minutes
-  workflow_dispatch:        # Allows manual run from the GitHub Actions tab
+  workflow_dispatch:        # Enables manual triggering from GitHub UI
 
 jobs:
   run-checks:
