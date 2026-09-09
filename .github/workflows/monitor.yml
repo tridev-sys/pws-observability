@@ -2,7 +2,7 @@ name: Async Uptime & SSL Monitor
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # Runs automatically every 5 minutes
+    - cron: '*/10 6-23 * * *'  # Runs automatically every 5 minutes
   push:
     branches:
       - main               # Runs immediately on new commits/pushes
