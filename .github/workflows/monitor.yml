@@ -43,7 +43,18 @@ jobs:
 
       - name: Install Dependencies
         if: steps.window.outputs.active == 'true'
-        run: pip install aiohttp
+        run: pip install "aiohttp==3.14.5"
+
+      # Alert cooldown state survives between runs via the cache (restore-keys
+      # picks up the newest saved state; each run saves a new entry).
+      - name: Restore alert state
+        if: steps.window.outputs.active == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: alert_state.json
+          key: alert-state-${{ github.run_id }}
+          restore-keys: |
+            alert-state-
 
       - name: Run Health Checks
         if: steps.window.outputs.active == 'true'
@@ -52,3 +63,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_URLS: ${{ secrets.TARGET_URLS }}
         run: python monitor.py
+
+      - name: Save alert state
+        if: always() && steps.window.outputs.active == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: alert_state.json
+          key: alert-state-${{ github.run_id }}

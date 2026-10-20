@@ -17,8 +17,10 @@ import asyncio
 import datetime
 import json
 import os
+import re
 import ssl
 import sys
+import time
 from urllib.parse import urlparse
 import aiohttp
 
@@ -37,6 +39,10 @@ TELEGRAM_HEADER = "🚨 *CRITICAL ALERT: ENDPOINT FAILURE DETECTED* 🚨\n\n"
 # Telegram rejects messages over 4096 characters; keep headroom for the header.
 TELEGRAM_MAX_CHARS = 4000
 MAX_ALERT_CHARS = 1000
+
+# Repeat alerts for the same problem are suppressed for this long.
+ALERT_STATE_PATH = os.environ.get("ALERT_STATE_PATH", "alert_state.json")
+ALERT_COOLDOWN_SECONDS = int(os.environ.get("ALERT_COOLDOWN_HOURS", "6")) * 3600
 
 
 def chunk_alerts(alerts_list):
@@ -103,8 +109,9 @@ async def check_ssl_expiry(domain, port=443):
     )
     reader, writer = await asyncio.wait_for(conn, timeout=5)
     cert = writer.get_extra_info("ssl_object").getpeercert()
-    writer.close()
-    await writer.wait_closed()
+    # Abort instead of a graceful close: some servers send data after close_notify,
+    # which makes a graceful shutdown raise even though the certificate was read.
+    writer.transport.abort()
 
     if not cert or "notAfter" not in cert:
       return
@@ -188,6 +195,24 @@ def normalize_urls(items):
   return urls
 
 
+def alert_key(alert):
+  """Stable identity for an alert: its first line, without the changing day count."""
+  return re.sub(r"\d+ days left", "", alert.splitlines()[0])
+
+
+def load_state():
+  try:
+    with open(ALERT_STATE_PATH) as f:
+      return json.load(f)
+  except (OSError, json.JSONDecodeError):
+    return {}
+
+
+def save_state(state):
+  with open(ALERT_STATE_PATH, "w") as f:
+    json.dump(state, f)
+
+
 async def main():
   raw_urls = os.environ.get("TARGET_URLS")
   if not raw_urls:
@@ -206,13 +231,30 @@ async def main():
     tasks = [safe_check_url(session, url, semaphore) for url in urls]
     await asyncio.gather(*tasks)
 
-  if alerts:
-    delivered = await send_telegram_summary(alerts)
-    print(f"Sent {len(alerts)} alerts to Telegram (delivered={delivered}).")
-    if not delivered:
-      sys.exit(1)  # Fail the run so a lost alert is visible in Actions.
-  else:
+  state = load_state()
+  now = time.time()
+  # Drop state for problems that are no longer failing, so a relapse alerts at once.
+  active = {alert_key(a) for a in alerts}
+  state = {k: v for k, v in state.items() if k in active}
+
+  if not alerts:
+    save_state(state)
     print("All URLs checked successfully. No issues found!")
+    return
+
+  to_send = [a for a in alerts if now - state.get(alert_key(a), 0) >= ALERT_COOLDOWN_SECONDS]
+  delivered = True
+  if to_send:
+    delivered = await send_telegram_summary(to_send)
+    print(f"Sent {len(to_send)} alerts to Telegram (delivered={delivered}).")
+    if delivered:
+      state.update({alert_key(a): now for a in to_send})
+  else:
+    print(f"{len(alerts)} active alerts were already sent within the cooldown.")
+
+  save_state(state)
+  if not delivered:
+    sys.exit(1)  # Fail the run so a lost alert is visible in Actions.
 
 
 if __name__ == "__main__":
