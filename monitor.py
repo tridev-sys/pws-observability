@@ -125,6 +125,23 @@ async def check_url(session, url, semaphore):
       await check_ssl_expiry(domain, port)
 
 
+def normalize_urls(items):
+  """Adds https:// to bare hostnames and drops duplicates, keeping order."""
+  seen = set()
+  urls = []
+  for item in items:
+    url = (item.get("url") if isinstance(item, dict) else item) or ""
+    url = url.strip()
+    if not url:
+      continue
+    if "://" not in url:
+      url = f"https://{url}"
+    if url not in seen:
+      seen.add(url)
+      urls.append(url)
+  return urls
+
+
 async def main():
   raw_urls = os.environ.get("TARGET_URLS")
   if not raw_urls:
@@ -132,7 +149,7 @@ async def main():
     return
 
   try:
-    urls = json.loads(raw_urls)
+    urls = normalize_urls(json.loads(raw_urls))
   except json.JSONDecodeError as e:
     print(f"Error parsing TARGET_URLS JSON: {e}")
     return
