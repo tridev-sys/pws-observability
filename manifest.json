@@ -1,0 +1,65 @@
+{
+  "name": "pws-observability",
+  "description": "Uptime and SSL-expiry monitor. Checks TARGET_URLS and sends one consolidated Telegram alert when something fails.",
+  "entrypoint": "monitor.py",
+  "runtime": {
+    "language": "python",
+    "version": "3.11",
+    "dependencies": ["aiohttp"],
+    "runner": "ubuntu-latest (GitHub Actions)"
+  },
+  "workflow": {
+    "file": ".github/workflows/monitor.yml",
+    "name": "Async Uptime & SSL Monitor",
+    "triggers": {
+      "schedule": "*/10 0-17 * * * (UTC)",
+      "push": ["main"],
+      "workflow_dispatch": true
+    }
+  },
+  "monitoring_window": {
+    "timezone": "Asia/Kolkata",
+    "start_hour": 6,
+    "end_hour": 23,
+    "applies_to": "all triggers",
+    "note": "Hours are IST. Adjust MONITOR_START_HOUR_IST and MONITOR_END_HOUR_IST in monitor.yml."
+  },
+  "secrets": ["TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "TARGET_URLS"],
+  "checks": {
+    "http": {
+      "alert_on": "status >= 500, or connection/timeout error",
+      "ignored_statuses": "2xx, 3xx, 4xx",
+      "request_timeout_seconds": 30,
+      "max_attempts": 3,
+      "retry_delay_seconds": 5,
+      "redirects": "followed (aiohttp default)",
+      "ssl_error": "alert immediately, no retry"
+    },
+    "ssl_expiry": {
+      "applies_to": "https URLs",
+      "connect_timeout_seconds": 5,
+      "alert_window_days": [0, 14],
+      "sni": true
+    },
+    "concurrency": {
+      "max_in_flight": 20
+    }
+  },
+  "alerts": {
+    "channel": "telegram",
+    "parse_mode": "Markdown",
+    "send_policy": "one message per run, only when there are alerts",
+    "types": [
+      "HTTP {status} FAILURE",
+      "ENDPOINT DOWN/TIMEOUT",
+      "SSL CERTIFICATE ERROR",
+      "SSL EXPIRING CRITICAL"
+    ]
+  },
+  "known_issues": [
+    "TARGET_URLS contains stale host xlsx-builder.koala.cx; should be xlsx-builder.heykoala.ai",
+    "workflow_dispatch runs every 10 minutes from an external dispatcher using the tridev-sys account",
+    "no alert dedup or cooldown",
+    "no 4096-character guard on Telegram message text"
+  ]
+}
