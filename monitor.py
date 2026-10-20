@@ -73,8 +73,10 @@ async def check_ssl_expiry(domain, port=443):
     if not cert or "notAfter" not in cert:
       return
 
+    # OpenSSL pads single-digit days with a space ("Jan  8"); collapse it first.
+    not_after = " ".join(cert["notAfter"].split())
     expiry_date = datetime.datetime.strptime(
-        cert["notAfter"], "%b %d %H:%M:%S %Y %GMT"
+        not_after, "%b %d %H:%M:%S %Y %Z"
     ).replace(tzinfo=datetime.timezone.utc)
     now = datetime.datetime.now(datetime.timezone.utc)
     days_left = (expiry_date - now).days
