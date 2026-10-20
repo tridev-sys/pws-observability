@@ -8,7 +8,7 @@ Covered Functionality:
 3. SSL Expiration Window: Alerts STRICTLY when 0 <= days_left <= 14 days.
 4. SSL Connection Failures: Catches broken, untrusted, or expired certs.
 5. SNI Support: Sends server_hostname to resolve multi-tenant/CDN SSL certs correctly.
-6. Transient Glitch Retries: 2-attempt retry loop per URL before alerting.
+6. Transient Glitch Retries: 3 attempts (30s timeout each) before alerting.
 7. Safe Bounded Concurrency: Uses Semaphore(20) to prevent WAF throttling.
 ===============================================================================
 """
@@ -25,6 +25,11 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 alerts = []
+
+# Slow-but-healthy pages (and redirect chains) get 30s per attempt, not 10s.
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+MAX_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 5
 
 
 async def send_telegram_summary(alerts_list):
@@ -84,7 +89,7 @@ async def check_ssl_expiry(domain, port=443):
 
 
 async def check_url(session, url, semaphore):
-  """Evaluates endpoint availability with 1 automatic retry."""
+  """Alerts only if every attempt fails with a 5xx or a connection error."""
   async with semaphore:
     url = url.get("url") if isinstance(url, dict) else url
 
@@ -92,27 +97,29 @@ async def check_url(session, url, semaphore):
     domain = parsed_url.hostname
     port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
 
-    for attempt in range(2):
+    failure = None
+    for attempt in range(MAX_ATTEMPTS):
       try:
         async with session.get(
-            url, timeout=10, allow_redirects=True
+            url, timeout=REQUEST_TIMEOUT, allow_redirects=True
         ) as response:
-          if response.status >= 500:
-            if attempt == 1:
-              alerts.append(f"🚨 *HTTP {response.status} FAILURE:* `{url}`")
-            else:
-              await asyncio.sleep(2)
-              continue
-          break
+          if response.status < 500:
+            failure = None
+            break
+          failure = f"🚨 *HTTP {response.status} FAILURE:* `{url}`"
       except aiohttp.ClientSSLError as ssl_err:
         alerts.append(f"🚨 *SSL CERTIFICATE ERROR:* `{url}`\n`{str(ssl_err)}`")
         return
       except Exception as e:
-        if attempt == 1:
-          alerts.append(f"🚨 *ENDPOINT DOWN/TIMEOUT:* `{url}`\n`Error: {str(e)}`")
-        else:
-          await asyncio.sleep(2)
-          continue
+        # Timeouts have an empty message, so fall back to the exception type.
+        detail = str(e) or type(e).__name__
+        failure = f"🚨 *ENDPOINT DOWN/TIMEOUT:* `{url}`\n`Error: {detail}`"
+
+      if attempt < MAX_ATTEMPTS - 1:
+        await asyncio.sleep(RETRY_DELAY_SECONDS)
+
+    if failure:
+      alerts.append(failure)
 
     if parsed_url.scheme == "https" and domain:
       await check_ssl_expiry(domain, port)
