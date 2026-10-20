@@ -2,30 +2,71 @@ name: Async Uptime & SSL Monitor
 
 on:
   schedule:
-    - cron: '*/10 6-23 * * *'  # Runs automatically every 5 minutes
+    # GitHub cron is always UTC. 00:00-17:50 UTC is 05:30-23:20 IST; the
+    # window step below enforces the exact IST hours.
+    - cron: '*/10 0-17 * * *'
   push:
     branches:
       - main               # Runs immediately on new commits/pushes
   workflow_dispatch:        # Allows manual run from GitHub Actions UI
 
+env:
+  # Monitoring window in IST (24h). Outside it, every trigger exits early.
+  MONITOR_START_HOUR_IST: 6
+  MONITOR_END_HOUR_IST: 23
+
 jobs:
   run-checks:
     runs-on: ubuntu-latest
     steps:
+      - name: Check monitoring window (IST)
+        id: window
+        run: |
+          hour=$(TZ=Asia/Kolkata date +%-H)
+          echo "Current IST hour: $hour"
+          if [ "$hour" -ge "$MONITOR_START_HOUR_IST" ] && [ "$hour" -lt "$MONITOR_END_HOUR_IST" ]; then
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Outside ${MONITOR_START_HOUR_IST}:00-${MONITOR_END_HOUR_IST}:00 IST, skipping checks."
+            echo "active=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout Code
+        if: steps.window.outputs.active == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.window.outputs.active == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install aiohttp
+        if: steps.window.outputs.active == 'true'
+        run: pip install "aiohttp==3.14.5"
+
+      # Alert cooldown state survives between runs via the cache (restore-keys
+      # picks up the newest saved state; each run saves a new entry).
+      - name: Restore alert state
+        if: steps.window.outputs.active == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: alert_state.json
+          key: alert-state-${{ github.run_id }}
+          restore-keys: |
+            alert-state-
 
       - name: Run Health Checks
+        if: steps.window.outputs.active == 'true'
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_URLS: ${{ secrets.TARGET_URLS }}
         run: python monitor.py
+
+      - name: Save alert state
+        if: always() && steps.window.outputs.active == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: alert_state.json
+          key: alert-state-${{ github.run_id }}
