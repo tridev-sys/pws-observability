@@ -40,9 +40,9 @@ TELEGRAM_HEADER = "🚨 *CRITICAL ALERT: ENDPOINT FAILURE DETECTED* 🚨\n\n"
 TELEGRAM_MAX_CHARS = 4000
 MAX_ALERT_CHARS = 1000
 
-# Repeat alerts for the same problem are suppressed for this long.
+# Repeat alerts for the same problem are suppressed for this long (kept short on purpose).
 ALERT_STATE_PATH = os.environ.get("ALERT_STATE_PATH", "alert_state.json")
-ALERT_COOLDOWN_SECONDS = int(os.environ.get("ALERT_COOLDOWN_HOURS", "6")) * 3600
+ALERT_COOLDOWN_SECONDS = int(os.environ.get("ALERT_COOLDOWN_MINUTES", "15")) * 60
 
 
 def chunk_alerts(alerts_list):
