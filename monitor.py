@@ -18,6 +18,7 @@ import datetime
 import json
 import os
 import ssl
+import sys
 from urllib.parse import urlparse
 import aiohttp
 
@@ -32,29 +33,64 @@ MAX_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 5
 
 
-async def send_telegram_summary(alerts_list):
-  """Dispatches a consolidated summary of all detected issues to Telegram."""
-  if not alerts_list:
-    return
+TELEGRAM_HEADER = "🚨 *CRITICAL ALERT: ENDPOINT FAILURE DETECTED* 🚨\n\n"
+# Telegram rejects messages over 4096 characters; keep headroom for the header.
+TELEGRAM_MAX_CHARS = 4000
+MAX_ALERT_CHARS = 1000
 
-  message = (
-      "🚨 *CRITICAL ALERT: ENDPOINT FAILURE DETECTED* 🚨\n\n"
-      + "\n\n".join(alerts_list)
-  )
+
+def chunk_alerts(alerts_list):
+  """Groups alerts into message bodies that each fit Telegram's length limit."""
+  chunks = []
+  current = ""
+  for alert in alerts_list:
+    alert = alert[:MAX_ALERT_CHARS]
+    candidate = f"{current}\n\n{alert}" if current else alert
+    if current and len(candidate) > TELEGRAM_MAX_CHARS:
+      chunks.append(current)
+      current = alert
+    else:
+      current = candidate
+  if current:
+    chunks.append(current)
+  return chunks
+
+
+async def post_telegram_message(session, text):
+  """Sends one message. Retries once as plain text if Markdown parsing fails."""
+  if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    print("Telegram credentials missing: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID.")
+    return False
+
   url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-  payload = {
-      "chat_id": TELEGRAM_CHAT_ID,
-      "text": message,
-      "parse_mode": "Markdown",
-  }
-
-  async with aiohttp.ClientSession() as session:
+  for parse_mode in ("Markdown", None):
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    if parse_mode:
+      payload["parse_mode"] = parse_mode
     try:
       async with session.post(url, json=payload, timeout=10) as resp:
-        if resp.status != 200:
-          print(f"Failed to send Telegram message: {await resp.text()}")
+        if resp.status == 200:
+          return True
+        print(f"Telegram rejected message (HTTP {resp.status}): {await resp.text()}")
+        if resp.status != 400:
+          return False
     except Exception as e:
       print(f"Telegram API delivery failed: {e}")
+      return False
+  return False
+
+
+async def send_telegram_summary(alerts_list):
+  """Sends all alerts in length-safe messages. Returns True only if all were delivered."""
+  if not alerts_list:
+    return True
+
+  delivered = True
+  async with aiohttp.ClientSession() as session:
+    for chunk in chunk_alerts(alerts_list):
+      if not await post_telegram_message(session, TELEGRAM_HEADER + chunk):
+        delivered = False
+  return delivered
 
 
 async def check_ssl_expiry(domain, port=443):
@@ -127,13 +163,21 @@ async def check_url(session, url, semaphore):
       await check_ssl_expiry(domain, port)
 
 
+async def safe_check_url(session, url, semaphore):
+  """Runs one check, turning any unexpected error into an alert instead of aborting the run."""
+  try:
+    await check_url(session, url, semaphore)
+  except Exception as e:
+    alerts.append(f"🚨 *CHECK ERROR:* `{url}`\n`{type(e).__name__}: {e}`")
+
+
 def normalize_urls(items):
   """Adds https:// to bare hostnames and drops duplicates, keeping order."""
   seen = set()
   urls = []
   for item in items:
-    url = (item.get("url") if isinstance(item, dict) else item) or ""
-    url = url.strip()
+    raw = item.get("url") if isinstance(item, dict) else item
+    url = str(raw or "").strip()
     if not url:
       continue
     if "://" not in url:
@@ -159,12 +203,14 @@ async def main():
   semaphore = asyncio.Semaphore(20)
 
   async with aiohttp.ClientSession() as session:
-    tasks = [check_url(session, url, semaphore) for url in urls]
+    tasks = [safe_check_url(session, url, semaphore) for url in urls]
     await asyncio.gather(*tasks)
 
   if alerts:
-    await send_telegram_summary(alerts)
-    print(f"Triggered {len(alerts)} alerts to Telegram.")
+    delivered = await send_telegram_summary(alerts)
+    print(f"Sent {len(alerts)} alerts to Telegram (delivered={delivered}).")
+    if not delivered:
+      sys.exit(1)  # Fail the run so a lost alert is visible in Actions.
   else:
     print("All URLs checked successfully. No issues found!")
 
